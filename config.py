@@ -3,8 +3,9 @@ import numpy as np
 import torch
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TARGET_DIR = "CAVE_drive-download-20250502T181816Z-1-001/Test/HSI"
+TARGET_DIR = "data/HSI"
 TARGET_FILES = glob(f"{TARGET_DIR}/*.mat")
+print(TARGET_FILES)
 QE_MODE = "per_rgb"
 DIR_TO_SAVE = "/PER_RGB"
 PATH_TO_SPECTRAL_FILTERS = "cmv_400_graph"

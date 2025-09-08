@@ -1,3 +1,4 @@
+import os
 from pathlib import Path 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -133,6 +134,11 @@ if __name__ == "__main__":
 
     for input_mat in config.TARGET_FILES:
         output_mat = input_mat.replace("/HSI", config.DIR_TO_SAVE)
+        
+        dir_to_save = output_mat.split("/")[:-1]
+        dir_to_save = "/".join(dir_to_save)
+        os.makedirs(dir_to_save, exist_ok=True)
+
         cube_np, wl_nm = load_mat_cube(input_mat)
         Hn, Wn, B = cube_np.shape
 
