@@ -3,12 +3,12 @@ import numpy as np
 import torch
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TARGET_DIR = "data/HSI"
+TARGET_DIR = "/Users/mac/Desktop/Hydra/CAVE_drive-download-20250502T181816Z-1-001/Train/HSI"
 TARGET_FILES = glob(f"{TARGET_DIR}/*.mat")
 print(TARGET_FILES)
 QE_MODE = "per_rgb"
 DIR_TO_SAVE = "/PER_RGB"
-PATH_TO_SPECTRAL_FILTERS = "cmv_400_graph"
+PATH_TO_SPECTRAL_FILTERS = "/Users/mac/Desktop/Hydra/for_git/cmv_400_graph"
 PATH_TO_WL = "wl_cave.txt"
 PIXEL_SIZE = 10e-6
 FOCAL_LENGTH = 0.3

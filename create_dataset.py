@@ -97,6 +97,9 @@ def load_mat_cube(mat_path: str):
     if cube.ndim != 3:
         raise ValueError(f"Ожидаю (H,W,B), получил shape={cube.shape}")
 
+    # Сохраняем исходный тип данных куба
+    original_dtype = cube.dtype
+    
     wl = None
     for k in ['wavelengths','wl','lambda','bands']:
         if k in m:
@@ -107,16 +110,19 @@ def load_mat_cube(mat_path: str):
             with open(config.PATH_TO_WL, 'r') as file:
                 wl = np.array([float(line.strip()) for line in file.readlines()])
         except:
-            raise ValueError("В .mat не найден вектор длин волн (wavelengths/wl/lambda/bands)")
+            raise ValueError("В .mat не найден вектор длин волн")
     wl = wl.astype(np.float32).reshape(-1)
     if np.nanmax(wl) < 50.0:
         wl = wl * 1000.0
 
-    cube = cube.astype(np.float32)
+    # Нормализация с сохранением исходного типа данных
     vmax = np.nanmax(cube)
     if vmax > 0:
         cube = cube / vmax
-    return cube, wl
+    
+    # Возвращаем куб в исходном типе данных
+    cube = cube.astype(original_dtype)
+    return cube, wl, original_dtype
 
 if __name__ == "__main__":
     torch.set_grad_enabled(False)
@@ -139,11 +145,15 @@ if __name__ == "__main__":
         dir_to_save = "/".join(dir_to_save)
         os.makedirs(dir_to_save, exist_ok=True)
 
-        cube_np, wl_nm = load_mat_cube(input_mat)
+        cube_np, wl_nm, input_dtype = load_mat_cube(input_mat)
         Hn, Wn, B = cube_np.shape
 
-        y = torch.linspace(-Hn//2, Hn//2 - 1, Hn, device=config.DEVICE) * config.PIXEL_SIZE
-        x = torch.linspace(-Wn//2, Wn//2 - 1, Wn, device=config.DEVICE) * config.PIXEL_SIZE
+        # Определяем соответствующий torch dtype
+        torch_dtype = torch.float64 if input_dtype == np.float64 else torch.float32
+        torch_complex_dtype = torch.complex128 if input_dtype == np.float64 else torch.complex64
+
+        y = torch.linspace(-Hn//2, Hn//2 - 1, Hn, device=config.DEVICE, dtype=torch_dtype) * config.PIXEL_SIZE
+        x = torch.linspace(-Wn//2, Wn//2 - 1, Wn, device=config.DEVICE, dtype=torch_dtype) * config.PIXEL_SIZE
         Y, X = torch.meshgrid(y, x, indexing="ij")
 
         fy = torch.fft.fftfreq(Hn, d=config.PIXEL_SIZE).to(config.DEVICE)
@@ -152,22 +162,20 @@ if __name__ == "__main__":
 
         lens_P = []
         for lam_m in lens_phases:
-            P = generate_lens_phase(lam_m, X, Y).to(torch.complex64)
+            P = generate_lens_phase(lam_m, X, Y).to(torch_complex_dtype)
             lens_P.append(P)
 
-        out_cube = torch.zeros((Hn, Wn, B), dtype=torch.float32, device=config.DEVICE)
+        out_cube = torch.zeros((Hn, Wn, B), dtype=torch_dtype, device=config.DEVICE)
 
         cube_t = torch.from_numpy(cube_np).to(config.DEVICE)  # (H,W,B)
+        
+        # Итеративный подход: для каждой длины волны проходим через все линзы отдельно
         for k in range(B):
             lam_nm = float(wl_nm[k])
-            lam_m  = np.float32(lam_nm * 1e-9)
+            lam_m  = input_dtype.type(lam_nm * 1e-9)
 
-            # H(λ_k, z)
+            # H(λ_k, z) - функция передачи Френеля для данной длины волны
             Hlam = fresnel_transfer_function(config.Z1, lam_m, FX, FY)
-
-            # Первый проход Френеля
-            field0_fft = torch.fft.fft2(cube_t[..., k].to(torch.complex64))
-            field1 = torch.fft.ifft2(field0_fft * Hlam)
 
             if config.QE_MODE == "per_rgb":
                 # 2→B, 1→G, 0→R
@@ -178,26 +186,60 @@ if __name__ == "__main__":
                 if (wB + wG + wR) == 0.0:
                     continue  # out of QE range
 
-                acc = torch.zeros((Hn, Wn), dtype=torch.float32, device=config.DEVICE)
+                acc = torch.zeros((Hn, Wn), dtype=torch_dtype, device=config.DEVICE)
+                
+                # Итерация по каждой линзе отдельно (аналогично garm_linz_refactor.py)
                 for idx, P in enumerate(lens_P):
+                    # Начальное поле для каждой итерации линзы
+                    field0 = cube_t[..., k].to(torch_complex_dtype)
+                    
+                    # Первый проход Френеля: объект → линза
+                    field1 = torch.fft.ifft2(torch.fft.fft2(field0) * Hlam)
+                    
+                    # Применение фазы линзы
                     field2 = field1 * P
+                    
+                    # Второй проход Френеля: линза → детектор
                     field3 = torch.fft.ifft2(torch.fft.fft2(field2) * Hlam)
-                    inten = torch.abs(field3)
+                    
+                    # Интенсивность на детекторе
+                    intensity = torch.abs(field3)
+                    
+                    # Взвешивание по спектральной чувствительности канала
                     w = wR if lens_to_color[idx] == "R" else (wG if lens_to_color[idx] == "G" else wB)
-                    acc = acc + inten * w
+                    acc = acc + intensity * w
+                
                 out_cube[..., k] = acc.square()
 
             else:
                 w_sensor = float(cmv_interp(np.float32(lam_nm)))
                 if w_sensor <= 0.0:
                     continue
-                acc = torch.zeros((Hn, Wn), dtype=torch.float32, device=config.DEVICE)
+                    
+                acc = torch.zeros((Hn, Wn), dtype=torch_dtype, device=config.DEVICE)
+                
+                # Итерация по каждой линзе отдельно
                 for P in lens_P:
+                    # Начальное поле для каждой итерации линзы
+                    field0 = cube_t[..., k].to(torch_complex_dtype)
+                    
+                    # Первый проход Френеля: объект → линза
+                    field1 = torch.fft.ifft2(torch.fft.fft2(field0) * Hlam)
+                    
+                    # Применение фазы линзы
                     field2 = field1 * P
+                    
+                    # Второй проход Френеля: линза → детектор
                     field3 = torch.fft.ifft2(torch.fft.fft2(field2) * Hlam)
+                    
+                    # Накопление интенсивности
                     acc = acc + torch.abs(field3)
+                
                 out_cube[..., k] = (acc * w_sensor).square()
 
         out_np = out_cube.detach().cpu().numpy()
-        savemat(output_mat, {"cube": out_np, "wavelengths": wl_nm.astype(np.float32)})
+        # Rotate 180 degrees
+        out_np = np.rot90(out_np, 2)
+        # Сохраняем выходной куб в том же типе данных, что и входной
+        savemat(output_mat, {"cube": out_np.astype(input_dtype), "wavelengths": wl_nm.astype(np.float32)})
         print(f"Готово: {output_mat}  shape={out_np.shape}")
